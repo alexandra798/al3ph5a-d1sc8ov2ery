@@ -15,6 +15,7 @@ from gan.utils import filter_valid_blds,save_blds
 from gan.network.generater import train_network_generator
 import gc
 from gan.utils.data import get_data_by_year
+from alphagen_generic.features import target
 
 
 # 检查PyTorch是否是CUDA版本
@@ -33,6 +34,8 @@ if is_cuda_available:
 def pre_process_y(y):
     min_y = 0
     max_y = y.flatten().max()
+    if max_y <= min_y + 1e-8:  # 添加保护
+        return y + 1e-8  # 返回微小非零值避免NaN
     y = (y - min_y) / (max_y - min_y) * 100
     return y
 
@@ -202,7 +205,6 @@ def main(
     assert isinstance(seeds,list)   
     os.environ["CUDA_VISIBLE_DEVICES"]=str(cuda)
     train_end = train_end_year
-    target = Div(Ref(close, -1), close) - 1.0
     returned = get_data_by_year(
         train_start = 2010,train_end=train_end,valid_year=train_end+1,test_year =train_end+2,
         instruments=instruments, target=target,freq=freq,
@@ -210,9 +212,17 @@ def main(
     data_all,data,data_valid,data_valid_withhead,data_test,data_test_withhead,_ = returned
     
     # 添加数据维度调试信息
+    print(f"Instruments: {instruments}")
+    print(f"实际股票列表长度: {len(data._stock_ids)}")
+    print(f"股票列表前10个: {data._stock_ids[:10].tolist()}")
+    print(f"数据形状详情: {data.data.shape}")
     print(f"数据维度: {data.data.shape}")
     print(f"时间范围: backtrack={data.max_backtrack_days}, future={data.max_future_days}")
+    print(f"股票数量: {data.n_stocks}")
+    print(f"时间长度: {data.n_days}")
+    print(f"特征数量: {data.n_features}")
 
+    
     for seed in seeds:
         reseed_everything(seed)
         class cfg:

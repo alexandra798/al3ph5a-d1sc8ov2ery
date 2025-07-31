@@ -86,6 +86,10 @@ class StockData:
         from qlib.data import D
         if not isinstance(exprs, list):
             exprs = [exprs]
+        print(f"\nDEBUG: Loading expressions: {exprs}")
+        print(f"DEBUG: Instrument: {self._instrument}")
+
+
         cal: np.ndarray = D.calendar(freq=self.freq)
         start_index = cal.searchsorted(pd.Timestamp(self._start_time))  # type: ignore
         end_index = cal.searchsorted(pd.Timestamp(self._end_time))  # type: ignore
@@ -96,6 +100,16 @@ class StockData:
         real_end_time = cal[end_index + self.max_future_days]
         result = (QlibDataLoader(config=exprs, freq=self.freq)  # type: ignore
                   .load(self._instrument, real_start_time, real_end_time))
+
+        #---
+        print(f"DEBUG: Result type: {type(result)}")
+        print(f"DEBUG: Result shape: {result.shape}")
+        print(f"DEBUG: Result columns type: {type(result.columns)}")
+        if hasattr(result.columns, 'levels'):
+            print(f"DEBUG: MultiIndex levels: {result.columns.levels}")
+        print(f"DEBUG: First few columns: {result.columns[:5].tolist()}")
+        #---
+
         return result
 
     def _get_data(self) -> Tuple[torch.Tensor, pd.Index, pd.Index]:
@@ -133,10 +147,16 @@ class StockData:
             # In case some expressions failed, we use the actual columns
             actual_features = df.columns.get_level_values(0).unique()
         else:
-            # Handle case where columns are not MultiIndex
-            # Assume columns are stock_ids and features need to be extracted differently
-            stock_ids = df.columns.unique()
-            actual_features = feature_names
+            # 当DataFrame只有单层columns时，说明只有一只股票
+            # 或者数据格式有问题
+            print(f"WARNING: DataFrame columns are not MultiIndex!")
+            print(f"DataFrame shape: {df.shape}")
+            print(f"DataFrame columns: {df.columns.tolist()[:5]}")
+            print(f"DataFrame index (dates): {df.index[:5].tolist()}")
+    
+            # 尝试从DataFrame的其他信息推断股票列表
+            # 这种情况下可能需要重新组织数据
+            raise ValueError("Data format error: Expected MultiIndex columns with (feature, instrument)")
 
         # Step 3: Create a complete column index
         new_columns = pd.MultiIndex.from_product(
