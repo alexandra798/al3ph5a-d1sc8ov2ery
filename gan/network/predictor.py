@@ -16,6 +16,7 @@ class NetP(nn.Module):
         n_chars ,
         hidden,
         seq_len,
+        factor_dim=64,  # 新增：因子表示维度
     ):
         super().__init__()
         assert seq_len == 20
@@ -32,21 +33,30 @@ class NetP(nn.Module):
             nn.ReLU(),
         )
         self.fc2 = nn.Sequential(nn.Linear(256, 1))
+        # 新增：因子表示头
+        self.factor_head = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, factor_dim),
+            nn.Tanh()  # 归一化到[-1, 1]
+        )
+        self.factor_dim = factor_dim
 
-    def forward(self, x, latent=False):
-        # x (bs,20,48)
+    def forward(self, x, latent=False, return_factor=False):
         x = x.float()
         x = x.permute(0, 2, 1)[:, :, None]
-        # x (bs, 48, 1, 20)
         x = self.convs(x)
-        # #[50, 128, 1, 6]
         x = x.reshape([x.shape[0], 128 * 6])
         latent_tensor = self.fc1(x)
-        x = self.fc2(latent_tensor)
-        if latent:
-            return x, latent_tensor
+        score = self.fc2(latent_tensor)
+        
+        if return_factor:
+            factor_repr = self.factor_head(latent_tensor)
+            return score, latent_tensor, factor_repr
+        elif latent:
+            return score, latent_tensor
         else:
-            return x
+            return score
         
     def initialize_parameters(self):
         for name, param in self.named_parameters():
@@ -290,30 +300,123 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split
 
 # 重写上面的函数 要求针对不同样本 有权重
-def train_net_p_with_weight(cfg,net,x,y,weights,lr=0.001):
-    # Example usage
-    x_train, x_valid, y_train, y_valid,weights_train,weights_valid = train_test_split(x, y,weights, test_size=0.2, random_state=42)
+def train_net_p_with_weight(cfg, net, x, y, weights, data, target, lr=0.001):
+    from alphagen.utils.correlation import batch_pearsonr
+    from alphagen.utils.pytorch_utils import normalize_by_day
+    
+    # 准备目标收益率数据
+    target_returns = normalize_by_day(target.evaluate(data))  # (n_days, n_stocks)
+    
+    x_train, x_valid, y_train, y_valid, weights_train, weights_valid = train_test_split(
+        x, y, weights, test_size=0.2, random_state=42)
 
-    # Create data loaders
-    train_loader = DataLoader(TensorDataset(x_train, y_train,weights_train),
-                                batch_size=cfg.batch_size_p, shuffle=True,
-                            )
-    valid_loader = DataLoader(TensorDataset(x_valid, y_valid,weights_valid), 
-                              batch_size=cfg.batch_size_p, shuffle=False)
-
-    # 带权重的loss
-    def ic_loss(pred_factors, true_returns):
-        ic = batch_pearsonr(pred_factors, true_returns)
-        return -ic.mean()
-
-    # Create your loss function, and optimizer
-    # loss_fn = torch.nn.MSELoss()
-    loss_fn = weighted_mse_loss
+    train_loader = DataLoader(
+        TensorDataset(x_train, y_train, weights_train),
+        batch_size=cfg.batch_size_p, shuffle=True)
+    valid_loader = DataLoader(
+        TensorDataset(x_valid, y_valid, weights_valid), 
+        batch_size=cfg.batch_size_p, shuffle=False)
+    
+    # 修改损失函数，加入IC损失
+    def combined_loss(pred_scores, true_scores, weights, factor_reprs, batch_indices):
+        # 原始的加权MSE损失
+        mse_loss = ((pred_scores - true_scores)**2 * weights).mean()
+        
+        # IC损失：通过因子表示计算IC
+        ic_loss = 0.0
+        if factor_reprs is not None:
+            # 将因子表示映射到实际的因子值
+            # 这里需要一个简单的解码器，可以是线性层
+            batch_size = factor_reprs.shape[0]
+            ic_losses = []
+            
+            for i in range(min(batch_size, 10)):  # 采样计算，避免计算量过大
+                # 模拟因子值（实际中可能需要更复杂的解码）
+                factor_values = factor_reprs[i].unsqueeze(0).repeat(data.n_days, data.n_stocks, 1)
+                factor_values = factor_values.mean(dim=-1)  # 简化：取平均作为因子值
+                factor_values = normalize_by_day(factor_values)
+                
+                # 计算IC
+                ic = batch_pearsonr(factor_values, target_returns).mean()
+                ic_losses.append(-ic)  # 负IC作为损失（最大化IC）
+            
+            if ic_losses:
+                ic_loss = torch.stack(ic_losses).mean()
+        
+        # 组合损失
+        total_loss = mse_loss + cfg.ic_loss_weight * ic_loss
+        return total_loss, mse_loss, ic_loss
+    
     optimizer = torch.optim.Adam(net.parameters(), lr=lr)
-
-
-    train_regression_model_with_weight(train_loader, valid_loader, net, 
-                           loss_fn, optimizer, device=cfg.device,
-                           num_epochs=cfg.num_epochs_p, use_tensorboard=False, 
-                           tensorboard_path='logs', early_stopping_patience=cfg.es_p)
+    
+    # 训练循环
+    best_valid_loss = float("inf")
+    best_weights = None
+    patience_counter = 0
+    
+    for epoch in range(cfg.num_epochs_p):
+        net.train()
+        total_train_loss = 0
+        total_mse_loss = 0
+        total_ic_loss = 0
+        total_samples_train = 0
+        
+        for batch_idx, (batch_x, batch_y, batch_w) in enumerate(train_loader):
+            batch_x = batch_x.to(cfg.device)
+            batch_y = batch_y.to(cfg.device)
+            batch_w = batch_w.to(cfg.device)
+            
+            optimizer.zero_grad()
+            outputs, _, factor_reprs = net(batch_x, return_factor=True)
+            
+            loss, mse_loss, ic_loss = combined_loss(
+                outputs, batch_y, batch_w, factor_reprs, 
+                batch_idx * cfg.batch_size_p + torch.arange(batch_x.size(0)))
+            
+            loss.backward()
+            optimizer.step()
+            
+            total_train_loss += loss.item() * batch_y.size(0)
+            total_mse_loss += mse_loss.item() * batch_y.size(0)
+            total_ic_loss += ic_loss.item() * batch_y.size(0)
+            total_samples_train += batch_y.size(0)
+        
+        # 验证
+        net.eval()
+        with torch.no_grad():
+            total_valid_loss = 0
+            total_samples_valid = 0
+            
+            for batch_x, batch_y, batch_w in valid_loader:
+                batch_x = batch_x.to(cfg.device)
+                batch_y = batch_y.to(cfg.device)
+                batch_w = batch_w.to(cfg.device)
+                
+                outputs, _, factor_reprs = net(batch_x, return_factor=True)
+                loss, _, _ = combined_loss(outputs, batch_y, batch_w, factor_reprs, None)
+                
+                total_valid_loss += loss.item() * batch_y.size(0)
+                total_samples_valid += batch_y.size(0)
+            
+            average_valid_loss = total_valid_loss / total_samples_valid
+            
+        print(f"Epoch [{epoch+1}/{cfg.num_epochs_p}], "
+              f"Train Loss: {total_train_loss/total_samples_train:.5f} "
+              f"(MSE: {total_mse_loss/total_samples_train:.5f}, "
+              f"IC: {total_ic_loss/total_samples_train:.5f}), "
+              f"Valid Loss: {average_valid_loss:.5f}")
+        
+        # Early stopping
+        if average_valid_loss < best_valid_loss - 1e-5:
+            best_valid_loss = average_valid_loss
+            patience_counter = 0
+            best_weights = copy.deepcopy(net.state_dict())
+        else:
+            patience_counter += 1
+            if patience_counter >= cfg.es_p:
+                print(f"Early stopping at epoch {epoch+1}")
+                break
+    
+    if best_weights is not None:
+        net.load_state_dict(best_weights)
 

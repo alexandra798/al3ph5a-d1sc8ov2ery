@@ -46,16 +46,57 @@ def loss_entropy(loss_inputs,cfg):
     entropy = entropy_1 + entropy_2
     entropy = entropy.mean()
     return entropy
-def get_losses(loss_inputs,cfg):
+
+def get_losses(loss_inputs, cfg, current_epoch=0, total_epochs=100):
+    # 动态权重调度
+    progress = current_epoch / total_epochs
+    
+    # 早期更注重多样性，后期更注重质量
+    diversity_weight = max(0.3, 1.0 - progress * 0.7)  # 从1.0降到0.3
+    quality_weight = min(1.0, 0.3 + progress * 0.7)    # 从0.3升到1.0
     
     loss = 0
-    if cfg.l_simi != 0 :
-        loss += cfg.l_simi *  loss_simi(loss_inputs,cfg)
-    if cfg.l_pred != 0 :
-        loss += cfg.l_pred * loss_pred(loss_inputs,cfg)
-    if cfg.l_potential !=0 :
-        loss += cfg.l_potential * loss_potential(loss_inputs,cfg)
-    if cfg.l_entropy !=0 :
-        loss += cfg.l_entropy * loss_entropy(loss_inputs,cfg)
+    loss_components = {}
     
-    return loss
+    # 预测损失（质量）
+    if cfg.l_pred != 0:
+        pred_loss = loss_pred(loss_inputs, cfg)
+        weighted_pred_loss = cfg.l_pred * quality_weight * pred_loss
+        loss += weighted_pred_loss
+        loss_components['pred'] = weighted_pred_loss.item()
+    
+    # 相似性损失（多样性）
+    if cfg.l_simi != 0:
+        simi_loss = loss_simi(loss_inputs, cfg)
+        weighted_simi_loss = cfg.l_simi * diversity_weight * simi_loss
+        loss += weighted_simi_loss
+        loss_components['simi'] = weighted_simi_loss.item()
+    
+    # 潜在空间损失（多样性）
+    if cfg.l_potential != 0:
+        potential_loss = loss_potential(loss_inputs, cfg)
+        weighted_potential_loss = cfg.l_potential * diversity_weight * potential_loss
+        loss += weighted_potential_loss
+        loss_components['potential'] = weighted_potential_loss.item()
+    
+    # 添加IC引导损失
+    if hasattr(cfg, 'l_ic_guide') and cfg.l_ic_guide != 0:
+        ic_guide_loss = loss_ic_guide(loss_inputs, cfg)
+        weighted_ic_loss = cfg.l_ic_guide * quality_weight * ic_guide_loss
+        loss += weighted_ic_loss
+        loss_components['ic_guide'] = weighted_ic_loss.item()
+    
+    return loss, loss_components
+
+def loss_ic_guide(loss_inputs, cfg):
+    """基于预测器的因子表示计算IC引导损失"""
+    latent_1 = loss_inputs['latent_1']
+    latent_2 = loss_inputs['latent_2']
+    
+    # 计算因子表示的差异性，鼓励生成不同的因子
+    factor_similarity = torch.cosine_similarity(latent_1, latent_2, dim=1).mean()
+    
+    # 惩罚过高的相似度
+    diversity_loss = torch.relu(factor_similarity - 0.5)
+    
+    return diversity_loss
