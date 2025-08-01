@@ -302,11 +302,9 @@ def train_net_p_with_weight(cfg,net,x,y,weights,lr=0.001):
                               batch_size=cfg.batch_size_p, shuffle=False)
 
     # 带权重的loss
-    def weighted_mse_loss(input, target, weights):
-        out = (input - target)**2
-        out = out * weights.expand_as(out)
-        loss = out.mean()
-        return loss
+    def ic_loss(pred_factors, true_returns):
+        ic = batch_pearsonr(pred_factors, true_returns)
+        return -ic.mean()
 
     # Create your loss function, and optimizer
     # loss_fn = torch.nn.MSELoss()

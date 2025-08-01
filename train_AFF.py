@@ -32,12 +32,10 @@ if is_cuda_available:
     print(f"Using GPU: {device_name}")
     
 def pre_process_y(y):
-    min_y = 0
-    max_y = y.flatten().max()
-    if max_y <= min_y + 1e-8:  # 添加保护
-        return y + 1e-8  # 返回微小非零值避免NaN
-    y = (y - min_y) / (max_y - min_y) * 100
-    return y
+    # 方案1：使用排序
+    ranks = scipy.stats.rankdata(y) / len(y)
+    return ranks
+    
 
 def numpy2onehot(integer_matrix,max_num_categories=None,min_num_categories=None):
     if max_num_categories is None:
