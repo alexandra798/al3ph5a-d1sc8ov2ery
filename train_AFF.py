@@ -196,9 +196,9 @@ def main(
         cuda:int = 0,
         save_name:str = 'test',
         zoo_size:int = 100,
-        corr_thresh:float = 0.5,  # 降低相关性阈值
-        ic_thresh:float = 0.01,    # 降低IC阈值
-        icir_thresh:float = 0.05,  # 降低ICIR阈值
+        corr_thresh:float = 0.7,  
+        ic_thresh:float = 0.03,    
+        icir_thresh:float = 0.1,  
 ):
     if isinstance(seeds,str):
         seeds = eval(seeds)
@@ -230,11 +230,11 @@ def main(
             max_len = 20
 
             # 减小batch size以节省内存
-            batch_size = 128  # 从256减小
-            potential_size = 50  # 从100减小
+            batch_size = 256
+            potential_size = 100
 
             n_layers = 2
-            d_model = 128  # 从128减小
+            d_model = 128
             dropout = 0.2
             num_factors = zoo_size
 
@@ -251,17 +251,14 @@ def main(
             es_p = 10
             batch_size_p = 64  # 从64减小
             num_epochs_p = 100
-            data_keep_p = 10000  
+            data_keep_p = 20000  
 
-            # 更宽松的筛选条件
-            f_corr_thresh = corr_thresh 
-            f_add_thresh = corr_thresh 
-            f_score_thresh = ic_thresh 
+            f_corr_thresh = corr_thresh # threshold to penalize the correlation
+            f_add_thresh = corr_thresh # threshold to add new exprs to the zoo
+            f_score_thresh = ic_thresh # threshold to filter exprs in the zoo
             f_multi_score_thresh = {'icir':icir_thresh}
 
-            # 内存管理配置
-            max_expressions_per_batch = 1000  # 限制每批处理的表达式数量
-            gc_frequency = 10  
+
 
             # loss configuaration
             l_pred = 1.
@@ -316,26 +313,16 @@ def main(
         
         # 减少初始收集的表达式数量
         coll.collect_target_num(netG,netM,z,data,target,metric,
-                                target_num=5000,reset_net=True,drop_invalid=False,  # 从10000减少到5000
+                                target_num=10000,reset_net=True,drop_invalid=False, 
                                 randomly = False,
-                                random_method = random_call,max_iter = 100)  # 从200减少到100
+                                random_method = random_call,max_iter = 200)  
 
         # train and mine untill the zoo is full
         t = 0
         while len(zoo_blds)<cfg.num_factors:
             print(f"\n=== Training iteration {t} ===")
             
-            # 添加内存监控
-            if torch.cuda.is_available():
-                current_memory = torch.cuda.memory_allocated() / 1024**3  # GB
-                max_memory = torch.cuda.max_memory_allocated() / 1024**3  # GB
-                print(f"GPU Memory: Current={current_memory:.2f}GB, Max={max_memory:.2f}GB")
-                
-                # 如果显存使用超过18GB（75%），强制清理
-                if current_memory > 18.0:
-                    print("Memory usage high, performing cleanup...")
-                    torch.cuda.empty_cache()
-                    gc.collect()
+            
             
             if not zoo_blds.examined:
                 print(' zoo_blds not examined')
@@ -383,10 +370,9 @@ def main(
             coll.reset(data,target,metric)
             # 减少生成的表达式数量
             coll.collect_target_num(netG,netM,z,data,target,metric,
-                                    target_num=min(500, cfg.max_expressions_per_batch),  # 从1000减少
-                                    reset_net=False,drop_invalid=False,
+                                    target_num=1000,reset_net=False,drop_invalid=False,
                                     randomly = False,
-                                    random_method = random_call,max_iter = 50)  # 从100减少
+                                    random_method = random_call,max_iter = 100) 
 
             lengh_s = {"train":len(blds_in_train)}
             lengh_s['new']=len(coll.blds)

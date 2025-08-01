@@ -138,68 +138,37 @@ class StockData:
         df = self._load_exprs(exprs)
         self.df_bak = df
 
-        # ==================== 新增修改区域 START ====================
-        # qlib返回的数据索引是 (datetime, instrument)，列是 features。
-        # 这被称为“长格式”。代码期望的“宽格式”是：索引为 datetime，
-        # 列为 MultiIndex (feature, instrument)。
-        # 使用 unstack() 将 instrument 从行索引移动到列索引。
+        # If qlib returns a MultiIndex, pivot to a simple datetime index
+
         if isinstance(df.index, pd.MultiIndex):
             df = df.unstack()
-        # ==================== 新增修改区域 END ======================
-
-        # Step 2: Identify all dimensions
-        dates = df.index.unique()
         
-        # Check if DataFrame has MultiIndex columns
+        dates = df.index
+
         if isinstance(df.columns, pd.MultiIndex):
             level_names = [name.lower() if isinstance(name, str) else '' for name in df.columns.names]
             first_is_inst = level_names[0] in {'instrument', 'code'}
-            # When the first level indicates instruments swap it so that
-            # columns are always ordered as (feature, instrument)
+
             if first_is_inst:
                 df = df.swaplevel(0, 1, axis=1)
-                df.columns = df.columns.set_names(['feature', 'instrument'])
-            stock_ids = df.columns.get_level_values('instrument').unique()
-            
-            # In case some expressions failed, we use the actual columns
-            actual_features = df.columns.get_level_values('feature').unique()
+            df = df.sort_index(axis=1, level=[1, 0])
+            stock_ids = df.columns.get_level_values(1).unique()
+            actual_features = df.columns.get_level_values(0).unique()
+            values = df.values.reshape(len(dates), len(stock_ids), len(actual_features))
+            values = values.transpose(0, 2, 1)
+
+
+
         else:
-            # 当DataFrame只有单层columns时，说明只有一只股票
-            # 或者数据格式有问题
-            print(f"WARNING: DataFrame columns are not MultiIndex!")
-            print(f"DataFrame shape: {df.shape}")
-            print(f"DataFrame columns: {df.columns.tolist()[:5]}")
-            print(f"DataFrame index (dates): {df.index[:5].tolist()}")
-    
-            # 尝试从DataFrame的其他信息推断股票列表
-            # 这种情况下可能需要重新组织数据
-            raise ValueError("Data format error: Expected MultiIndex columns with (feature, instrument)")
+            stock_ids = pd.Index([self._instrument]) if isinstance(self._instrument, str) else pd.Index(self._instrument)
+            actual_features = df.columns
+            values = df.values[:, None, :]
 
-        # Step 3: Create a complete column index
-        new_columns = pd.MultiIndex.from_product(
-            [actual_features, stock_ids],
-            names=['feature', 'instrument']
-        )
 
-        # Step 4: Reindex the DataFrame to make it dense, filling missing data with NaN
-        df_dense = df.reindex(columns=new_columns)
 
-        # Step 5: Sort columns to ensure a predictable order for reshaping
-        df_dense = df_dense.sort_index(axis=1, level=['instrument', 'feature'])
+        return torch.tensor(values, dtype=torch.float, device=self.device), pd.Index(dates), pd.Index(stock_ids)
 
-        # Step 6: Get values and reshape
-        values = df_dense.values
-        num_dates = len(dates)
-        num_stocks = len(stock_ids)
-        num_features = len(actual_features)
-
-        # Reshape to (dates, stocks, features)
-        values = values.reshape((num_dates, num_stocks, num_features))
-
-        # Step 7: Transpose to (dates, features, stocks) to match original code's expectation
-        values = values.transpose(0, 2, 1)
-
-        return torch.tensor(values, dtype=torch.float, device=self.device), dates, stock_ids
+        
 
     @property
     def n_features(self) -> int:
